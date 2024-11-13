@@ -19,6 +19,8 @@ class FactorizedSelfAttention(nn.Module):
         
         # Capa para ajustar la dimensión a d_model si es necesario
         self.adjust_dim = nn.Linear(input_dim, d_model) if input_dim != d_model else nn.Identity()
+
+        self.reduce_dim = nn.Linear(d_model, input_dim) if d_model != input_dim else nn.Identity()
     
     def forward(self, x):
         # x shape: [batch_size, num_modalities, sequence_length, input_dim]
@@ -31,7 +33,7 @@ class FactorizedSelfAttention(nn.Module):
 
         # Fusionar dimensiones de batch y modalidad para aplicar la atención temporal
         batch_size, num_modalities, sequence_length, _ = x.size()
-        
+            
         # Reorganizar para que `sequence_length` sea compatible con la atención temporal
         x = x.permute(0, 2, 1, 3).reshape(batch_size * sequence_length, num_modalities, self.d_model)
         attn_output_temporal, _ = self.temporal_attention(x, x, x)
@@ -49,6 +51,8 @@ class FactorizedSelfAttention(nn.Module):
         # Restaurar la forma final
         attn_output_modality = attn_output_modality.view(batch_size, sequence_length, num_modalities, self.d_model).transpose(1, 2)
         
+        # Reducir la dimensión de salida a 224 si es necesario
+        attn_output_modality = self.reduce_dim(attn_output_modality)
         return attn_output_modality
 
 
@@ -71,12 +75,13 @@ class MCANet(nn.Module):
 
 # UCFFormer Network
 class UCFFormer(nn.Module):
-    def __init__(self, input_dim=224, d_model=512, num_heads=8, num_layers=4, num_classes=10, mode='simultaneous'):
+    def __init__(self, input_dim=224, d_model=224, num_heads=8, num_layers=4, num_classes=10, mode='simultaneous'):
         super(UCFFormer, self).__init__()
         self.d_model = d_model
         self.ftmt = nn.ModuleList([FactorizedSelfAttention(input_dim, d_model, num_heads, mode) for _ in range(num_layers)])
         self.mcanet = MCANet(d_model)
         self.fc = nn.Linear(d_model, num_classes)
+        self.expand_dim = nn.Linear(input_dim, d_model) if input_dim != d_model else nn.Identity()
     
     def forward(self, modalities):
         # print("entrada forward")
@@ -85,12 +90,20 @@ class UCFFormer(nn.Module):
         fused = torch.cat(modalities, dim=0)  # Concatenate all modalities
         # print("pass fused")
         count = 0
+        
         for layer in self.ftmt:
             # print(count)
             count+=1
+            # print("FUSED")
+            print(fused.shape)
             fused = layer(fused)
-            break;
+
+            
         # print("pass for")
+        fused = self.expand_dim(fused)
+        # print("Forma de fused después de expand_dim:", fused.shape)
+
+
         fused_features = self.mcanet(fused[0], fused[1:])
         output = self.fc(fused_features.mean(dim=1))  # Global average pooling + classification
         # print("salida forward")
@@ -225,7 +238,7 @@ def expand_features_to_match_labels(features, labels):
 # Aplicar a FeaturesTrain1 y FeaturesTrain2
 FeaturesTrain1 = expand_features_to_match_labels(FeaturesTrain1, YTrain)
 FeaturesTrain2 = expand_features_to_match_labels(FeaturesTrain2, YYTrain)
-FeaturesTrain2 = expand_features_to_match_labels(FeaturesTest1, YTest)
+FeaturesTest1 = expand_features_to_match_labels(FeaturesTest1, YTest)
 
 print("Dimensiones de FeaturesTrain1:", FeaturesTrain1.size())
 print("Dimensiones de YTrain:", YTrain.size())
@@ -238,48 +251,12 @@ train_dataset = TensorDataset(FeaturesTrain1, YTrain)
 test_dataset = TensorDataset(FeaturesTest1, YTest)
 
 # Crear data loaders
-batch_size = 32
+batch_size = 224
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=batch_size)
 
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
-
-def train_model(model, train_loader, criterion, optimizer, num_epochs=10):
-    model.train()
-    for epoch in range(num_epochs):
-        running_loss = 0.0
-        correct, total = 0, 0
-        for features, labels in train_loader:
-            optimizer.zero_grad()
-            output = model([features])  # Pasa las características al modelo
-            loss = criterion(output, labels)
-            loss.backward()
-            optimizer.step()
-            
-            running_loss += loss.item()
-            _, predicted = output.max(1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {running_loss/len(train_loader):.4f}, Accuracy: {100 * correct / total:.2f}%")
-
-num_epochs = 10
-train_model(model, train_loader, criterion, optimizer, num_epochs=num_epochs)
-
-def evaluate_model(model, test_loader):
-    model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for features, labels in test_loader:
-            output = model([features])
-            _, predicted = output.max(1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-    print(f"Test Accuracy: {100 * correct / total:.2f}%")
-
-evaluate_model(model, test_loader)
-
 
 
 
